@@ -5,11 +5,8 @@ Processes recorded audio files (.wav) from experiments/<input-dir>/samples/,
 extracts the test frequency from the sample filename (sample_xxxxxx.x.wav),
 computes transfer function magnitude and phase using a single-frequency DFT,
 calculates RMS levels, and outputs to experiments/<input-dir>/analysis/:
-  1. report.csv - frequency, magnitude, phase, piezo_rms, mic_rms
-  2. resonance_response.png - transfer-function magnitude/phase plots
-  3. rms_response.png - RMS level vs frequency plots
-  4. sorted_magnitude_response.png - sorted magnitude response plot
-  5. response_area.csv - response area (dB-Hz) summary
+  1. report.csv           - frequency, magnitude, phase, piezo_rms, mic_rms
+  2. average_magnitude.csv - mean transfer-function magnitude (dB) summary
 """
 
 import argparse
@@ -20,11 +17,16 @@ import wave
 import numpy as np
 
 
+resonance_bands = {
+    "A0": (270, 280),
+    "A1": (460, 470),
+    "B1-": (440, 470),
+    "B1+": (470, 540),
+    "Bridge hill": (2000, 3000),
+    "Secondary/nasal hill": (4500, 6000),
+}
 
 # ---------------------------------------------------------------------
-# Config & baseline
-# ---------------------------------------------------------------------
-RESPONSE_AREA_BASELINE_DB = -40
 
 
 def bin_ratio(piezo, mic, freq, fs):
@@ -173,30 +175,77 @@ def analyze_samples(input_dir, analysis_dir=None):
     return freqs, magnitudes, phases, piezo_dbfs_arr, mic_dbfs_arr
 
 
-def compute_response_area(freqs, magnitudes):
-    """Compute dB-Hz response area above RESPONSE_AREA_BASELINE_DB."""
-    valid = np.isfinite(freqs) & np.isfinite(magnitudes)
+def compute_average_magnitude_db(freqs, magnitudes):
+    """Compute the mean transfer-function magnitude in dB across all valid frequency points."""
+    valid = np.isfinite(freqs) & np.isfinite(magnitudes) & (magnitudes > 0)
     if not np.any(valid):
         return np.nan
-
-    freqs = np.asarray(freqs[valid], dtype=float)
-    magnitudes = np.asarray(magnitudes[valid], dtype=float)
-    order = np.argsort(freqs)
-    magnitude_db = 20 * np.log10(magnitudes[order])
-    area_height_db = np.maximum(magnitude_db - RESPONSE_AREA_BASELINE_DB, 0)
-    return float(np.trapezoid(area_height_db, freqs[order]))
+    return float(np.mean(20 * np.log10(magnitudes[valid])))
 
 
-def save_response_area_csv(output_dir, experiment_areas):
-    """Write area-under-curve values for each experiment to response_area.csv."""
+def save_average_magnitude_csv(output_dir, experiment_averages):
+    """Write mean magnitude (dB) for each experiment to average_magnitude.csv."""
     os.makedirs(output_dir, exist_ok=True)
-    output_path = os.path.join(output_dir, "response_area.csv")
+    output_path = os.path.join(output_dir, "average_magnitude.csv")
 
     with open(output_path, "w", newline="") as csv_file:
         writer = csv.writer(csv_file)
-        writer.writerow(["experiment_name", "response_area_db_hz"])
-        for experiment_name, area in experiment_areas.items():
-            writer.writerow([experiment_name, area])
+        writer.writerow(["experiment_name", "average_magnitude_db"])
+        for experiment_name, avg in experiment_averages.items():
+            writer.writerow([experiment_name, avg])
+
+    return output_path
+
+
+def compute_band_magnitudes(freqs, magnitudes, bands):
+    """
+    Sum the linear transfer-function magnitudes that fall within each named
+    frequency band, then convert the total to dB.
+
+    Parameters
+    ----------
+    freqs      : array-like of measured frequencies (Hz)
+    magnitudes : array-like of linear |H| values (same length as freqs)
+    bands      : dict mapping band_name -> (low_hz, high_hz)
+
+    Returns
+    -------
+    dict mapping band_name -> sum_db  (float, or nan if no points fall in band)
+    """
+    freqs = np.asarray(freqs, dtype=float)
+    magnitudes = np.asarray(magnitudes, dtype=float)
+    valid = np.isfinite(freqs) & np.isfinite(magnitudes) & (magnitudes > 0)
+
+    results = {}
+    for band_name, (low, high) in bands.items():
+        in_band = valid & (freqs >= low) & (freqs <= high)
+        if not np.any(in_band):
+            results[band_name] = float("nan")
+        else:
+            total_linear = float(np.sum(magnitudes[in_band]))
+            results[band_name] = 20 * np.log10(total_linear)
+    return results
+
+
+def save_band_magnitudes_csv(output_dir, band_results, bands):
+    """
+    Write per-band summed magnitude (dB) to band_magnitudes.csv.
+
+    Parameters
+    ----------
+    output_dir   : destination directory
+    band_results : dict mapping band_name -> sum_db (from compute_band_magnitudes)
+    bands        : original resonance_bands dict (used to record Hz ranges)
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    output_path = os.path.join(output_dir, "band_magnitudes.csv")
+
+    with open(output_path, "w", newline="") as csv_file:
+        writer = csv.writer(csv_file)
+        writer.writerow(["band_name", "low_hz", "high_hz", "sum_magnitude_db"])
+        for band_name, sum_db in band_results.items():
+            low, high = bands[band_name]
+            writer.writerow([band_name, low, high, sum_db])
 
     return output_path
 
@@ -235,11 +284,22 @@ if __name__ == "__main__":
     print(f"Analyzing recorded samples from {samples_dir}...")
     freqs, mags, phases, piezo_dbfs_arr, mic_dbfs_arr = analyze_samples(input_dir, analysis_dir)
 
-    experiment_areas = {experiment_name: compute_response_area(freqs, mags)}
-    response_area_csv = save_response_area_csv(analysis_dir, experiment_areas)
+    experiment_averages = {experiment_name: compute_average_magnitude_db(freqs, mags)}
+    average_magnitude_csv = save_average_magnitude_csv(analysis_dir, experiment_averages)
 
-    print(f"\nResponse area above {RESPONSE_AREA_BASELINE_DB} dB:")
-    for exp_name, area in experiment_areas.items():
-        print(f"  {exp_name}: {area:.6f} dB-Hz")
-    print(f"Saved area summary to: {response_area_csv}")
+    print(f"\nAverage magnitude:")
+    for exp_name, avg in experiment_averages.items():
+        print(f"  {exp_name}: {avg:.6f} dB")
+    print(f"Saved average magnitude to: {average_magnitude_csv}")
+
+    band_results = compute_band_magnitudes(freqs, mags, resonance_bands)
+    band_csv = save_band_magnitudes_csv(analysis_dir, band_results, resonance_bands)
+
+    print(f"\nBand magnitudes (sum of |H| in band, dB):")
+    for band_name, sum_db in band_results.items():
+        low, high = resonance_bands[band_name]
+        db_str = f"{sum_db:.4f} dB" if not np.isnan(sum_db) else "no data"
+        print(f"  {band_name:30s} [{low:5g}–{high:5g} Hz]: {db_str}")
+    print(f"Saved band magnitudes to: {band_csv}")
+
     print(f"\nRun plot.py to generate plots from {analysis_dir}/report.csv")

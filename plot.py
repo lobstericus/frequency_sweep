@@ -85,6 +85,47 @@ def load_experiment_csv(input_dir):
     return freqs, magnitudes, phases, piezo_dbfs, mic_dbfs
 
 
+def load_band_magnitudes_csv(input_dir):
+    """
+    Load band_magnitudes.csv from *input_dir* and return a list of
+    (band_name, low_hz, high_hz, sum_magnitude_db) tuples.
+
+    Looks for the CSV at:
+      1. <input_dir>/analysis/band_magnitudes.csv
+      2. experiments/<input_dir>/analysis/band_magnitudes.csv
+
+    Returns None (with a warning) if the file is not found, so callers can
+    skip the band plot gracefully when the CSV has not yet been generated.
+    """
+    candidates = [
+        os.path.join(input_dir, "analysis", "band_magnitudes.csv"),
+        os.path.join("experiments", input_dir, "analysis", "band_magnitudes.csv"),
+    ]
+
+    csv_path = None
+    for cand in candidates:
+        if os.path.isfile(cand):
+            csv_path = cand
+            break
+
+    if not csv_path:
+        print(f"  Warning: band_magnitudes.csv not found for '{input_dir}' — skipping band plot.", file=sys.stderr)
+        return None
+
+    bands = []
+    with open(csv_path, newline="") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            sum_db = float(row["sum_magnitude_db"]) if row["sum_magnitude_db"] not in ("nan", "") else float("nan")
+            bands.append((
+                row["band_name"],
+                float(row["low_hz"]),
+                float(row["high_hz"]),
+                sum_db,
+            ))
+    return bands
+
+
 # ---------------------------------------------------------------------------
 # Plotting
 # ---------------------------------------------------------------------------
@@ -224,6 +265,79 @@ def plot_sorted_magnitude_response(experiments, output_dir):
     print(f"Saved: {out_path}")
 
 
+def plot_band_magnitudes(band_experiments, output_dir):
+    """
+    Scatter plot of per-band summed magnitude (dB) for all experiments.
+
+    Parameters
+    ----------
+    band_experiments : list of (name, bands)
+        where bands is a list of (band_name, low_hz, high_hz, sum_db) tuples
+        as returned by load_band_magnitudes_csv.
+    output_dir : str
+    """
+    # Build a canonical band order from the first experiment that has data.
+    band_order = None
+    for _, bands in band_experiments:
+        if bands is not None:
+            band_order = [(b[0], b[1], b[2]) for b in bands]
+            break
+
+    if band_order is None:
+        print("  Warning: no band magnitude data available — skipping band plot.", file=sys.stderr)
+        return
+
+    colors = plt.rcParams["axes.prop_cycle"].by_key().get("color",
+        ["C0", "C1", "C2", "C3", "C4", "C5", "C6", "C7"])
+
+    x_positions = np.arange(len(band_order))
+    x_labels = [f"{name}\n{low:g}–{high:g} Hz" for name, low, high in band_order]
+
+    # Spread multiple experiments slightly so overlapping points stay visible.
+    n = len(band_experiments)
+    offsets = np.linspace(-0.15, 0.15, n) if n > 1 else [0.0]
+
+    fig, ax = plt.subplots(figsize=(max(8, len(band_order) * 1.6), 5))
+    title = "Band Magnitudes"
+    if len(band_experiments) == 1:
+        title += f" — {band_experiments[0][0]}"
+    ax.set_title(title)
+
+    for idx, (name, bands) in enumerate(band_experiments):
+        if bands is None:
+            continue
+        color = colors[idx % len(colors)]
+        alpha = 1.0 if idx == 0 else 0.85
+
+        # Build a lookup so bands missing from this experiment plot as NaN.
+        band_lookup = {b[0]: b[3] for b in bands}
+        y_values = [band_lookup.get(b[0], float("nan")) for b in band_order]
+
+        xs = x_positions + offsets[idx]
+        ys = np.array(y_values, dtype=float)
+
+        # Plot finite points as filled circles, NaN points as an 'x' marker.
+        finite = np.isfinite(ys)
+        ax.scatter(xs[finite], ys[finite],
+                   label=name, color=color, alpha=alpha, s=80, zorder=3)
+        if np.any(~finite):
+            ax.scatter(xs[~finite], np.zeros(np.sum(~finite)),
+                       marker="x", color=color, alpha=alpha, s=60,
+                       label=f"{name} (no data)", zorder=3)
+
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(x_labels, rotation=30, ha="right")
+    ax.set_ylabel("Sum magnitude (dB)")
+    ax.grid(True, axis="y", linestyle="--", alpha=0.6)
+    ax.legend(loc="best")
+
+    plt.tight_layout()
+    out_path = os.path.join(output_dir, "band_magnitudes.png")
+    plt.savefig(out_path)
+    plt.close(fig)
+    print(f"Saved: {out_path}")
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -259,6 +373,7 @@ def main():
     # Load all experiments
     # ------------------------------------------------------------------
     experiments = []
+    band_experiments = []
     for input_dir in args.input_dirs:
         name = os.path.basename(os.path.normpath(input_dir))
         print(f"Loading '{name}' from {input_dir} ...")
@@ -268,6 +383,7 @@ def main():
             print(f"Error: {exc}", file=sys.stderr)
             sys.exit(1)
         experiments.append((name, freqs, mags, phases, piezo_dbfs, mic_dbfs))
+        band_experiments.append((name, load_band_magnitudes_csv(input_dir)))
 
     # ------------------------------------------------------------------
     # Prepare output directory
@@ -283,6 +399,7 @@ def main():
     plot_resonance_response(experiments, output_dir)
     plot_rms_response(experiments, output_dir)
     plot_sorted_magnitude_response(experiments, output_dir)
+    plot_band_magnitudes(band_experiments, output_dir)
 
     print(f"\nAll plots written to: {output_dir}")
 
