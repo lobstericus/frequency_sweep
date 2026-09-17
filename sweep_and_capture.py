@@ -232,4 +232,6 @@ if __name__ == "__main__":
     else:
         freqs = np.logspace(np.log10(MIN_FREQ), np.log10(MAX_FREQ), NUM_SAMPLES)
 
+    freqs = np.round(freqs, 1)
+
     capture_frequency_steps(freqs, output_dir=args.output_dir)
