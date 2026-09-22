@@ -8,13 +8,13 @@ The first step is to generate tones and capture the response to raw wav files
 
     jack-pw python jack_capture.py --output-dir <eperiment-name>
 
-Then perform the analysis
+Then perform the analysis (does not use jack)
 
-    jack-pw python analyze.py --input-dir <experiment>
+    python analyze.py --input-dir <experiment>
 
-Finally you can create plots
+Finally you can create plots (does not use jack)
 
-    jack-pw python plot.py --input-dir <experiment> --output-dir <experiment>
+    python plot.py --input-dir <experiment> --output-dir <experiment>
 
 You can combine multiple experiments in one plot
 

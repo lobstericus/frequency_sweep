@@ -1,0 +1,8 @@
+
+Calculate Q ... function of dispersion of the resonance
+
+Delay compensation for acoustic signal to make phases interpretable
+
+some sample quality checks:
+ - minimum RMS
+ - sinusoidal qualities? Should somewhat match input ...

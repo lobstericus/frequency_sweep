@@ -1,0 +1,21 @@
+{
+  "auto_connect": true,
+  "exciter_out_ports": [
+    "ZEDi10 Analog Surround 4.0:playback_FL",
+    "ZEDi10 Analog Surround 4.0:playback_FR"
+  ],
+  "channels": [
+    {"name": "exciter_piezo", "port": "ZEDi10 Analog Surround 4.0:capture_FL"},
+    {"name": "mic", "port": "ZEDi10 Analog Surround 4.0:capture_FR"},
+    {"name": "body_piezo", "port": "ZEDi10 Analog Surround 4.0:capture_RL"}
+  ],
+  "settle_time": 0.3,
+  "capture_time": 0.5,
+  "min_freq": 80,
+  "max_freq": 6000,
+  "num_samples": 300,
+  "compute_resonance": [
+    {"source": "exciter_piezo", "sink": "mic"},
+    {"source": "exciter_piezo", "sink": "body_piezo"}
+  ]
+}
