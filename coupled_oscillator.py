@@ -162,9 +162,11 @@ def plot_response(output_path=None):
         fig.savefig(output_path)
         return
 
-    fig.subplots_adjust(bottom=0.22)
-    slider_ax = fig.add_axes((0.25, 0.05, 0.5, 0.03))
-    slider = Slider(slider_ax, "Coupling (N/m)", 0.0, 20.0, valinit=COUPLING_STIFFNESS)
+    fig.subplots_adjust(right=0.82)
+    slider_ax = fig.add_axes((0.92, 0.15, 0.03, 0.7))
+    slider = Slider(
+        slider_ax, "Coupling\n(N/m)", 0.0, 20.0, valinit=COUPLING_STIFFNESS, orientation="vertical",
+    )
 
     def on_change(val):
         draw_response(ax_drive, ax1, ax1_vel, ax2, ax2_vel, val)
