@@ -25,22 +25,34 @@ Each --input-dir is expected to contain either:
 
 import argparse
 import csv
+import json
 import os
 import sys
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.ticker import LogLocator, ScalarFormatter, NullFormatter
 
+from analyze import resonance_bands
+
 plt.rcParams["savefig.dpi"] = 300
 
-from analyze import load_parameters, resonance_label
-
 LINESTYLES = ["-", "--", ":", "-."]
+SMOOTHING_BANDWIDTH_OCTAVES = 1 / 6
 
 
 # ---------------------------------------------------------------------------
 # CSV loading
 # ---------------------------------------------------------------------------
+
+def load_parameters(input_dir):
+    """Load an experiment's capture-time parameters.json file."""
+    with open(os.path.join(input_dir, "parameters.json")) as f:
+        return json.load(f)
+
+
+def resonance_label(resonance):
+    """Return a stable name for a configured source/sink resonance pair."""
+    return resonance.get("name") or f"{resonance['sink']}_over_{resonance['source']}"
 
 def resolve_experiment_dir(input_dir):
     """Finds the directory that directly contains parameters.json for an
@@ -175,7 +187,49 @@ def _configure_log_xaxis(ax):
     """Apply consistent log-scale x-axis tick formatting to *ax*."""
     ax.xaxis.set_major_locator(LogLocator(base=10, subs=(1, 2, 3, 5, 7)))
     ax.xaxis.set_major_formatter(ScalarFormatter())
+    ax.xaxis.set_minor_locator(LogLocator(base=10, subs=np.arange(1.0, 10.0, 0.5)))
     ax.xaxis.set_minor_formatter(NullFormatter())
+    ax.tick_params(axis="x", which="major", bottom=True, top=False,
+                   length=10, width=1.5, color="black", direction="out")
+    ax.tick_params(axis="x", which="minor", bottom=True, top=False,
+                   length=4, width=0.8, color="black", direction="out")
+    ax.grid(True, which="minor", axis="x", alpha=0.2)
+
+
+def _add_resonance_band_background(ax, label_bands=False):
+    """Shade configured resonance bands, optionally labeling them by name."""
+    colors = ("#f3c677", "#8fc7b5")
+    for index, (name, (low, high)) in enumerate(resonance_bands.items()):
+        ax.axvspan(low, high, color=colors[index % len(colors)], alpha=0.18, zorder=0)
+        if label_bands:
+            ax.text(
+                np.sqrt(low * high), 0.98, name,
+                transform=ax.get_xaxis_transform(),
+                ha="center", va="top", rotation=90, fontsize=6,
+                color="black", alpha=0.5, zorder=2,
+            )
+
+
+def _smooth_log_frequency(freqs, values, circular=False):
+    """Apply Gaussian smoothing with a fixed bandwidth in log-frequency space."""
+    freqs = np.asarray(freqs, dtype=float)
+    values = np.asarray(values, dtype=float)
+    valid = np.isfinite(freqs) & (freqs > 0) & np.isfinite(values)
+    smoothed = np.full(values.shape, np.nan)
+    if not np.any(valid):
+        return smoothed
+
+    log_freqs = np.log2(freqs[valid])
+    distances = (log_freqs[:, None] - log_freqs[None, :]) / SMOOTHING_BANDWIDTH_OCTAVES
+    weights = np.exp(-0.5 * distances ** 2)
+    source = values[valid]
+
+    if circular:
+        unit_vectors = np.exp(1j * source)
+        smoothed[valid] = np.angle(weights @ unit_vectors)
+    else:
+        smoothed[valid] = (weights @ source) / weights.sum(axis=1)
+    return smoothed
 
 
 def plot_resonance_response(experiments, output_dir):
@@ -211,16 +265,25 @@ def plot_resonance_response(experiments, output_dir):
             title += f" — {relevant[0]['name']}"
         fig.suptitle(title)
 
+        _add_resonance_band_background(ax1, label_bands=True)
+        _add_resonance_band_background(ax2)
+
         for idx, exp in enumerate(relevant):
             color = colors[idx % len(colors)]
             lw = 2 if idx == 0 else 1.5
-            alpha = 1.0 if idx == 0 else 0.9
+            smooth_alpha = 1.0 if idx == 0 else 0.9
             mags = exp["resonances"][label]["magnitude"]
             phases = exp["resonances"][label]["phase"]
-            ax1.semilogx(exp["freqs"], 20 * np.log10(mags),
-                         label=exp["name"], linewidth=lw, alpha=alpha, color=color)
+            magnitude_db = 20 * np.log10(mags)
+            ax1.semilogx(exp["freqs"], magnitude_db,
+                         label=exp["name"], linewidth=lw, alpha=0.5, color=color, zorder=3)
+            ax1.semilogx(exp["freqs"], _smooth_log_frequency(exp["freqs"], magnitude_db),
+                         linewidth=lw, alpha=smooth_alpha, color=color, zorder=4)
             ax2.semilogx(exp["freqs"], np.degrees(phases),
-                         label=exp["name"], linewidth=lw, alpha=alpha, color=color)
+                         label=exp["name"], linewidth=lw, alpha=0.5, color=color, zorder=3)
+            ax2.semilogx(exp["freqs"], np.degrees(_smooth_log_frequency(
+                exp["freqs"], phases, circular=True
+            )), linewidth=lw, alpha=smooth_alpha, color=color, zorder=4)
 
         ax1.set_ylabel("Magnitude (dB)")
         ax1.grid(True, which="both")
