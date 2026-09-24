@@ -1,4 +1,7 @@
 
+Resonance
+----------
+
 Calculate Q ... function of dispersion of the resonance
 
 Delay compensation for acoustic signal to make phases interpretable
@@ -6,3 +9,9 @@ Delay compensation for acoustic signal to make phases interpretable
 some sample quality checks:
  - minimum RMS
  - sinusoidal qualities? Should somewhat match input ...
+
+
+ Coupled Oscillators
+ --------------------
+
+ Code to do a full sweep and plot so we can see transfer to oscillator 2 (bridge) with different stiffness values ... 
