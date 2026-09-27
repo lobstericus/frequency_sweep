@@ -37,7 +37,6 @@ from analyze import resonance_bands
 plt.rcParams["savefig.dpi"] = 300
 
 LINESTYLES = ["-", "--", ":", "-."]
-SMOOTHING_BANDWIDTH_OCTAVES = 1 / 6
 
 
 # ---------------------------------------------------------------------------
@@ -126,6 +125,20 @@ def load_experiment(input_dir):
             "phase": np.array([float(row[f"{label}_phase_radians"]) for row in rows], dtype=float),
         }
 
+    smoothed_report_path = os.path.join(os.path.dirname(report_path), "report_smoothed.csv")
+    if os.path.isfile(smoothed_report_path):
+        with open(smoothed_report_path, newline="") as csv_file:
+            smoothed_rows = list(csv.DictReader(csv_file))
+        for r, label in zip(resonances_cfg, resonance_labels):
+            resonances[label]["magnitude_smoothed"] = np.array(
+                [float(row[f"{label}_magnitude"]) for row in smoothed_rows], dtype=float
+            )
+            resonances[label]["phase_smoothed"] = np.array(
+                [float(row[f"{label}_phase_radians"]) for row in smoothed_rows], dtype=float
+            )
+    else:
+        print(f"  Warning: report_smoothed.csv not found for '{input_dir}' — skipping smoothed curve.", file=sys.stderr)
+
     name = os.path.basename(os.path.normpath(input_dir))
     return {
         "name": name,
@@ -210,28 +223,6 @@ def _add_resonance_band_background(ax, label_bands=False):
             )
 
 
-def _smooth_log_frequency(freqs, values, circular=False):
-    """Apply Gaussian smoothing with a fixed bandwidth in log-frequency space."""
-    freqs = np.asarray(freqs, dtype=float)
-    values = np.asarray(values, dtype=float)
-    valid = np.isfinite(freqs) & (freqs > 0) & np.isfinite(values)
-    smoothed = np.full(values.shape, np.nan)
-    if not np.any(valid):
-        return smoothed
-
-    log_freqs = np.log2(freqs[valid])
-    distances = (log_freqs[:, None] - log_freqs[None, :]) / SMOOTHING_BANDWIDTH_OCTAVES
-    weights = np.exp(-0.5 * distances ** 2)
-    source = values[valid]
-
-    if circular:
-        unit_vectors = np.exp(1j * source)
-        smoothed[valid] = np.angle(weights @ unit_vectors)
-    else:
-        smoothed[valid] = (weights @ source) / weights.sum(axis=1)
-    return smoothed
-
-
 def plot_resonance_response(experiments, output_dir):
     """
     Plot transfer-function magnitude (dB) and phase (deg) vs frequency,
@@ -277,13 +268,14 @@ def plot_resonance_response(experiments, output_dir):
             magnitude_db = 20 * np.log10(mags)
             ax1.semilogx(exp["freqs"], magnitude_db,
                          label=exp["name"], linewidth=lw, alpha=0.5, color=color, zorder=3)
-            ax1.semilogx(exp["freqs"], _smooth_log_frequency(exp["freqs"], magnitude_db),
-                         linewidth=lw, alpha=smooth_alpha, color=color, zorder=4)
             ax2.semilogx(exp["freqs"], np.degrees(phases),
                          label=exp["name"], linewidth=lw, alpha=0.5, color=color, zorder=3)
-            ax2.semilogx(exp["freqs"], np.degrees(_smooth_log_frequency(
-                exp["freqs"], phases, circular=True
-            )), linewidth=lw, alpha=smooth_alpha, color=color, zorder=4)
+            if "magnitude_smoothed" in exp["resonances"][label]:
+                smoothed_magnitude_db = 20 * np.log10(exp["resonances"][label]["magnitude_smoothed"])
+                ax1.semilogx(exp["freqs"], smoothed_magnitude_db,
+                             linewidth=lw, alpha=smooth_alpha, color=color, zorder=4)
+                ax2.semilogx(exp["freqs"], np.degrees(exp["resonances"][label]["phase_smoothed"]),
+                             linewidth=lw, alpha=smooth_alpha, color=color, zorder=4)
 
         ax1.set_ylabel("Magnitude (dB)")
         ax1.grid(True, which="both")

@@ -8,6 +8,7 @@ import sys
 import wave
 
 import numpy as np
+from scipy.signal import savgol_filter
 
 
 resonance_bands = {
@@ -107,11 +108,42 @@ def analyze_samples(input_dir, analysis_dir=None):
 
     n_samples = len(sample_files)
     freqs = np.array([frequency for frequency, _ in sample_files], dtype=float)
+    channel_rms = {name: np.zeros(n_samples) for name in channel_names}
     channel_rms_dbfs = {name: np.zeros(n_samples) for name in channel_names}
     resonance_magnitudes = {label: np.zeros(n_samples) for label in resonance_labels}
     resonance_phases = {label: np.zeros(n_samples) for label in resonance_labels}
 
-    report_path = os.path.join(analysis_dir, "report.csv")
+    for index, (frequency, wav_path) in enumerate(sample_files):
+        channels, fs = load_channel_wav(wav_path, channel_names)
+        rms_parts = []
+        for name in channel_names:
+            rms = float(np.sqrt(np.mean(channels[name] ** 2)))
+            dbfs = 20 * np.log10(rms) if rms > 0 else -np.inf
+            channel_rms[name][index] = rms
+            channel_rms_dbfs[name][index] = dbfs
+            rms_parts.append(f"{name}_rms = {dbfs:5.2f} dBFS")
+
+        resonance_parts = []
+        for resonance, label in zip(resonances, resonance_labels):
+            magnitude, phase = bin_ratio(
+                channels[resonance["source"]], channels[resonance["sink"]], frequency, fs
+            )
+            resonance_magnitudes[label][index] = magnitude
+            resonance_phases[label][index] = phase
+            resonance_parts.append(
+                f"{label} |H| = {magnitude:5.2f} phase = {np.degrees(phase):7.2f} deg"
+            )
+
+        print(f"{frequency:7.2f} Hz  " + "  ".join(resonance_parts + rms_parts))
+
+    return (freqs, channel_names, channel_rms, channel_rms_dbfs, resonance_labels,
+            resonance_magnitudes, resonance_phases)
+
+
+def write_report_csv(analysis_dir, freqs, channel_names, channel_rms, resonance_labels,
+                      resonance_magnitudes, resonance_phases, filename="report.csv"):
+    """Write the per-sample analysis results to analysis_dir/filename."""
+    report_path = os.path.join(analysis_dir, filename)
     with open(report_path, "w", newline="") as report_file:
         writer = csv.writer(report_file)
         header = ["frequency_hz"] + [f"{name}_rms" for name in channel_names]
@@ -119,33 +151,39 @@ def analyze_samples(input_dir, analysis_dir=None):
             header.extend((f"{label}_magnitude", f"{label}_phase_radians", f"{label}_phase_degrees"))
         writer.writerow(header)
 
-        for index, (frequency, wav_path) in enumerate(sample_files):
-            channels, fs = load_channel_wav(wav_path, channel_names)
-            row = [frequency]
-            rms_parts = []
-            for name in channel_names:
-                rms = float(np.sqrt(np.mean(channels[name] ** 2)))
-                dbfs = 20 * np.log10(rms) if rms > 0 else -np.inf
-                channel_rms_dbfs[name][index] = dbfs
-                row.append(rms)
-                rms_parts.append(f"{name}_rms = {dbfs:5.2f} dBFS")
-
-            resonance_parts = []
-            for resonance, label in zip(resonances, resonance_labels):
-                magnitude, phase = bin_ratio(
-                    channels[resonance["source"]], channels[resonance["sink"]], frequency, fs
-                )
-                resonance_magnitudes[label][index] = magnitude
-                resonance_phases[label][index] = phase
+        for index, frequency in enumerate(freqs):
+            row = [frequency] + [channel_rms[name][index] for name in channel_names]
+            for label in resonance_labels:
+                magnitude = resonance_magnitudes[label][index]
+                phase = resonance_phases[label][index]
                 row.extend((magnitude, phase, np.degrees(phase)))
-                resonance_parts.append(
-                    f"{label} |H| = {magnitude:5.2f} phase = {np.degrees(phase):7.2f} deg"
-                )
-
             writer.writerow(row)
-            print(f"{frequency:7.2f} Hz  " + "  ".join(resonance_parts + rms_parts))
 
-    return freqs, channel_names, channel_rms_dbfs, resonance_labels, resonance_magnitudes, resonance_phases
+    return report_path
+
+
+def smooth_samples(channel_names, channel_rms, resonance_labels, resonance_magnitudes, resonance_phases,
+                    window_length=25, polyorder=3):
+    """Apply Savitzky-Golay smoothing (over the frequency-ordered samples) to the RMS,
+    magnitude, and phase results and return them in the same shape as analyze_samples."""
+    n_samples = len(next(iter(channel_rms.values())))
+    window_length = min(window_length, n_samples if n_samples % 2 else n_samples - 1)
+    if window_length <= polyorder:
+        raise ValueError(
+            f"Not enough samples ({n_samples}) to smooth with polyorder {polyorder}"
+        )
+
+    def smooth(values):
+        return savgol_filter(values, window_length, polyorder)
+
+    def smooth_phase(values):
+        """Smooth via the unit-circle components to avoid +/-pi wraparound artifacts."""
+        return np.arctan2(smooth(np.sin(values)), smooth(np.cos(values)))
+
+    smoothed_rms = {name: smooth(channel_rms[name]) for name in channel_names}
+    smoothed_magnitudes = {label: smooth(resonance_magnitudes[label]) for label in resonance_labels}
+    smoothed_phases = {label: smooth_phase(resonance_phases[label]) for label in resonance_labels}
+    return smoothed_rms, smoothed_magnitudes, smoothed_phases
 
 
 def compute_average_magnitude_db(freqs, magnitudes):
@@ -213,7 +251,17 @@ def main():
 
     analysis_dir = os.path.join(input_dir, "analysis")
     print(f"Analyzing recorded samples from {samples_dir}...")
-    freqs, _, _, labels, magnitudes, _ = analyze_samples(input_dir, analysis_dir)
+    freqs, channel_names, channel_rms, _, labels, magnitudes, phases = analyze_samples(input_dir, analysis_dir)
+    print(f"Saved report to: {write_report_csv(analysis_dir, freqs, channel_names, channel_rms, labels, magnitudes, phases)}")
+
+    smoothed_rms, smoothed_magnitudes, smoothed_phases = smooth_samples(
+        channel_names, channel_rms, labels, magnitudes, phases
+    )
+    smoothed_report_path = write_report_csv(
+        analysis_dir, freqs, channel_names, smoothed_rms, labels, smoothed_magnitudes, smoothed_phases,
+        filename="report_smoothed.csv",
+    )
+    print(f"Saved smoothed report to: {smoothed_report_path}")
 
     averages = {label: compute_average_magnitude_db(freqs, magnitudes[label]) for label in labels}
     print("\nAverage magnitude:")
