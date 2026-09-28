@@ -157,6 +157,12 @@ def save_channel_wav(freq, channel_data, channel_names, fs, out_dir=None):
     os.makedirs(out_dir, exist_ok=True)
     wav_path = os.path.join(out_dir, f"sample_{freq:07.1f}.wav")
     stacked = np.column_stack(channel_data)
+
+    clipped = np.abs(stacked) >= 1.0
+    for index, name in enumerate(channel_names):
+        if np.any(clipped[:, index]):
+            print(f"  Warning: {name} clipped at {freq:.1f} Hz (exceeded interface dynamic range)")
+
     pcm16 = (np.clip(stacked, -1.0, 1.0) * 32767.0).astype(np.int16)
 
     with wave.open(wav_path, "wb") as wf:

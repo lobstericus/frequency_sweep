@@ -8,7 +8,8 @@ import sys
 import wave
 
 import numpy as np
-from scipy.signal import savgol_filter
+from scipy.optimize import curve_fit
+from scipy.signal import find_peaks, savgol_filter
 
 
 resonance_bands = {
@@ -186,6 +187,74 @@ def smooth_samples(channel_names, channel_rms, resonance_labels, resonance_magni
     return smoothed_rms, smoothed_magnitudes, smoothed_phases
 
 
+def find_resonance_peaks(freqs, resonance_labels, smoothed_magnitudes, prominence=0.1):
+    """Find peak frequencies in each resonance's smoothed magnitude curve using scipy.signal.find_peaks."""
+    peaks_by_label = {}
+    for label in resonance_labels:
+        magnitude = smoothed_magnitudes[label]
+        finite_magnitude = np.where(np.isfinite(magnitude), magnitude, -np.inf)
+        indices, _ = find_peaks(finite_magnitude, prominence=prominence)
+        peaks_by_label[label] = [
+            (float(freqs[index]), float(magnitude[index])) for index in indices
+        ]
+    return peaks_by_label
+
+
+def save_resonance_peaks_csv(analysis_dir, peaks_by_label, filename="smoothed_resonance_peaks.csv"):
+    """Write each resonance's smoothed-curve peak frequencies, and their fitted damped-oscillator
+    parameters, to analysis_dir/filename."""
+    output_path = os.path.join(analysis_dir, filename)
+    with open(output_path, "w", newline="") as output_file:
+        writer = csv.writer(output_file)
+        writer.writerow((
+            "resonance_name", "peak_frequency_hz", "peak_magnitude",
+            "fitted_f0_hz", "fitted_q", "fitted_a0",
+        ))
+        for label, peaks in peaks_by_label.items():
+            for frequency, magnitude, f0, q, a0 in peaks:
+                writer.writerow((label, frequency, magnitude, f0, q, a0))
+    return output_path
+
+
+def damped_oscillator_response(f, f0, q, a0):
+    """Damped harmonic oscillator amplitude response: A0 / sqrt((f0^2 - f^2)^2 + (f*f0/Q)^2)."""
+    return a0 / np.sqrt((f0 ** 2 - f ** 2) ** 2 + (f * f0 / q) ** 2)
+
+
+def fit_resonance_peaks(freqs, resonance_labels, resonance_magnitudes, peaks_by_label, window=15):
+    """For each detected peak, fit a window of the raw (unsmoothed) sample magnitudes around it
+    to the damped-oscillator response via nonlinear least squares, solving for f0, Q, and A0.
+    Returns peaks_by_label with (frequency, magnitude, f0, q, a0) tuples, using NaN for fit
+    parameters that fail to converge or have too few valid samples in the window."""
+    fitted_peaks_by_label = {}
+    for label in resonance_labels:
+        magnitude = resonance_magnitudes[label]
+        fitted_peaks = []
+        for peak_freq, peak_magnitude in peaks_by_label[label]:
+            peak_index = int(np.argmin(np.abs(freqs - peak_freq)))
+            low = max(0, peak_index - window // 2)
+            high = min(len(freqs), peak_index + window // 2 + 1)
+            window_freqs = freqs[low:high]
+            window_magnitude = magnitude[low:high]
+            valid = np.isfinite(window_magnitude) & (window_magnitude > 0)
+
+            f0, q, a0 = np.nan, np.nan, np.nan
+            if np.count_nonzero(valid) >= 3:
+                initial_q = 10.0
+                initial_guess = (peak_freq, initial_q, peak_magnitude * peak_freq ** 2 / initial_q)
+                try:
+                    (f0, q, a0), _ = curve_fit(
+                        damped_oscillator_response, window_freqs[valid], window_magnitude[valid],
+                        p0=initial_guess, maxfev=10000,
+                    )
+                except RuntimeError:
+                    f0, q, a0 = np.nan, np.nan, np.nan
+
+            fitted_peaks.append((peak_freq, peak_magnitude, f0, q, a0))
+        fitted_peaks_by_label[label] = fitted_peaks
+    return fitted_peaks_by_label
+
+
 def compute_average_magnitude_db(freqs, magnitudes):
     """Compute the mean transfer-function magnitude in dB across valid points."""
     valid = np.isfinite(freqs) & np.isfinite(magnitudes) & (magnitudes > 0)
@@ -262,6 +331,10 @@ def main():
         filename="report_smoothed.csv",
     )
     print(f"Saved smoothed report to: {smoothed_report_path}")
+
+    peaks_by_label = find_resonance_peaks(freqs, labels, smoothed_magnitudes)
+    fitted_peaks_by_label = fit_resonance_peaks(freqs, labels, magnitudes, peaks_by_label)
+    print(f"Saved smoothed resonance peaks to: {save_resonance_peaks_csv(analysis_dir, fitted_peaks_by_label)}")
 
     averages = {label: compute_average_magnitude_db(freqs, magnitudes[label]) for label in labels}
     print("\nAverage magnitude:")

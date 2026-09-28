@@ -139,6 +139,18 @@ def load_experiment(input_dir):
     else:
         print(f"  Warning: report_smoothed.csv not found for '{input_dir}' — skipping smoothed curve.", file=sys.stderr)
 
+    peaks_path = os.path.join(os.path.dirname(report_path), "smoothed_resonance_peaks.csv")
+    if os.path.isfile(peaks_path):
+        with open(peaks_path, newline="") as csv_file:
+            peak_rows = list(csv.DictReader(csv_file))
+        for label in resonance_labels:
+            resonances[label]["peak_frequencies"] = np.array(
+                [float(row["peak_frequency_hz"]) for row in peak_rows if row["resonance_name"] == label],
+                dtype=float,
+            )
+    else:
+        print(f"  Warning: smoothed_resonance_peaks.csv not found for '{input_dir}' — skipping peak markers.", file=sys.stderr)
+
     name = os.path.basename(os.path.normpath(input_dir))
     return {
         "name": name,
@@ -276,6 +288,9 @@ def plot_resonance_response(experiments, output_dir):
                              linewidth=lw, alpha=smooth_alpha, color=color, zorder=4)
                 ax2.semilogx(exp["freqs"], np.degrees(exp["resonances"][label]["phase_smoothed"]),
                              linewidth=lw, alpha=smooth_alpha, color=color, zorder=4)
+            for peak_freq in exp["resonances"][label].get("peak_frequencies", []):
+                ax1.axvline(peak_freq, color=color, linestyle=":", linewidth=lw, alpha=smooth_alpha, zorder=2)
+                ax2.axvline(peak_freq, color=color, linestyle=":", linewidth=lw, alpha=smooth_alpha, zorder=2)
 
         ax1.set_ylabel("Magnitude (dB)")
         ax1.grid(True, which="both")
