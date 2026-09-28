@@ -149,8 +149,8 @@ class SweepClient:
 
 
 def save_channel_wav(freq, channel_data, channel_names, fs, out_dir=None):
-    """Saves an N-channel 16-bit PCM WAV file of the captured channels
-    for this step, in the order given by channel_names."""
+    """Saves an N-channel 16-bit PCM WAV file of the captured channels for this step, in
+    the order given by channel_names. Returns a dict mapping channel name to its RMS."""
     if out_dir is None:
         out_dir = os.path.join("experiments", "default", "samples")
 
@@ -159,9 +159,11 @@ def save_channel_wav(freq, channel_data, channel_names, fs, out_dir=None):
     stacked = np.column_stack(channel_data)
 
     clipped = np.abs(stacked) >= 1.0
+    rms_by_channel = {}
     for index, name in enumerate(channel_names):
         if np.any(clipped[:, index]):
             print(f"  Warning: {name} clipped at {freq:.1f} Hz (exceeded interface dynamic range)")
+        rms_by_channel[name] = float(np.sqrt(np.mean(stacked[:, index] ** 2)))
 
     pcm16 = (np.clip(stacked, -1.0, 1.0) * 32767.0).astype(np.int16)
 
@@ -214,14 +216,22 @@ def capture_frequency_steps(freqs, channels, exciter_out_ports, output_dir="defa
     channel_names = [ch["name"] for ch in channels]
 
     sc = SweepClient(channels, exciter_out_ports, auto_connect=auto_connect)
+    rms_by_channel = {name: [] for name in channel_names}
     try:
         for i, f in enumerate(freqs):
             channel_data = sc.run_step(f, settle_time, capture_time)
             save_channel_figure(f, channel_data, channel_names, sc.fs, out_dir=samples_dir)
-            save_channel_wav(f, channel_data, channel_names, sc.fs, out_dir=samples_dir)
+            step_rms = save_channel_wav(f, channel_data, channel_names, sc.fs, out_dir=samples_dir)
+            for name, rms in step_rms.items():
+                rms_by_channel[name].append(rms)
             print(f"[{i+1}/{len(freqs)}] {f:7.2f} Hz captured -> {samples_dir}")
     finally:
         sc.close()
+
+    print("\nRMS level range across the sweep (10th-90th percentile, -1 to +1 scale):")
+    for name, rms_values in rms_by_channel.items():
+        p10, p90 = np.percentile(rms_values, (10, 90))
+        print(f"  {name}: {p10:.4f} - {p90:.4f}")
 
 
 def dump_parameters(output_dir, settings, num_samples):
