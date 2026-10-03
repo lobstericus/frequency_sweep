@@ -11,6 +11,7 @@ a resonance analysis module and a plotting utility.
 # Physical Setup
 
  * Setup the violin on a chin rest and a pillow under the scroll so that the whole body can vibrate freely.
+ * Stick a cloth or tissue under strings to prevent sympathetic resonances
  * Clip the transducer to the bridge of the violin
  * Place the mic 30cm above the bridge.
  * Use the oscilloscope to setup the channels. Set the frequency to 440 and wave shape to sine and turn on the generator. Make sure the mic, exciter piezo and body piezo are all showing 0.6 RMS signal amplitude. You can adjust the direct injection box or audio interface gains.
