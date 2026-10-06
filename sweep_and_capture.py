@@ -173,6 +173,8 @@ def save_channel_wav(freq, channel_data, channel_names, fs, out_dir=None):
         wf.setframerate(int(fs))
         wf.writeframes(pcm16.tobytes())
 
+    return rms_by_channel
+
 
 def save_channel_figure(freq, channel_data, channel_names, fs, out_dir=None):
     """Saves a raw waveform plot of all captured channels for this step (to
@@ -228,10 +230,12 @@ def capture_frequency_steps(freqs, channels, exciter_out_ports, output_dir="defa
     finally:
         sc.close()
 
-    print("\nRMS level range across the sweep (10th-90th percentile, -1 to +1 scale):")
+    print("\nRMS level summary across the sweep (-1 to +1 scale):")
     for name, rms_values in rms_by_channel.items():
-        p10, p90 = np.percentile(rms_values, (10, 90))
-        print(f"  {name}: {p10:.4f} - {p90:.4f}")
+        minimum, p25, median, p75, maximum = np.percentile(
+            rms_values, (0, 25, 50, 75, 100)
+        )
+        print(f"  {name}: min={minimum:.4f} p25={p25:.4f} median={median:.4f} p75={p75:.4f} max={maximum:.4f}")
 
 
 def dump_parameters(output_dir, settings, num_samples):

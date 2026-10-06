@@ -18,6 +18,7 @@ import jack
 import numpy as np
 import pyqtgraph as pg
 from PySide6 import QtCore, QtWidgets
+from scipy.signal import find_peaks
 
 
 DEFAULT_SETTINGS_PATH = "settings.json"
@@ -44,7 +45,14 @@ class ScopeClient:
         self.channel_names = [ch["name"] for ch in channels]
         self.exciter_out_ports = exciter_out_ports
 
-        self.client = jack.Client("oscilloscope")
+        try:
+            self.client = jack.Client("oscilloscope")
+        except jack.JackOpenError as exc:
+            raise RuntimeError(
+                f"Could not open JACK client: {exc}.\n"
+                "If your audio is routed through PipeWire, run this script via 'pw-jack':\n"
+                "  pw-jack python oscilloscope.py"
+            ) from exc
         self.in_ports = [
             self.client.inports.register(f"{ch['name']}_in") for ch in channels
         ]
@@ -69,12 +77,20 @@ class ScopeClient:
                 try:
                     self.client.connect(self.out_port, out_port)
                 except jack.JackError as exc:
-                    print(f"  Warning: could not connect tone_out to {out_port}: {exc}", file=sys.stderr)
+                    print(
+                        f"  Warning: could not connect tone_out to {out_port}: {exc}\n"
+                        "  If running under PipeWire, make sure to launch with 'pw-jack python oscilloscope.py'.",
+                        file=sys.stderr,
+                    )
             for ch, in_port in zip(self.channels, self.in_ports):
                 try:
                     self.client.connect(ch["port"], in_port)
                 except jack.JackError as exc:
-                    print(f"  Warning: could not connect {ch['port']}: {exc}", file=sys.stderr)
+                    print(
+                        f"  Warning: could not connect {ch['port']}: {exc}\n"
+                        "  If running under PipeWire, make sure to launch with 'pw-jack python oscilloscope.py'.",
+                        file=sys.stderr,
+                    )
         else:
             print("AUTO_CONNECT is off — patch these in qpwgraph before continuing:")
             for out_port in self.exciter_out_ports:
@@ -154,6 +170,18 @@ class ScopeWindow(QtWidgets.QMainWindow):
             for color, name in zip(CURVE_COLORS, self.client.channel_names)
         ]
 
+        self.spectrum_widget = pg.PlotWidget(background="k")
+        self.spectrum_widget.showGrid(x=True, y=True, alpha=0.3)
+        self.spectrum_widget.setLabel("bottom", "Frequency", units="Hz")
+        self.spectrum_widget.setLabel("left", "Power", units="dB")
+        self.spectrum_widget.setLogMode(x=True, y=False)
+        self.spectrum_widget.addLegend()
+        self.spectrum_curves = [
+            self.spectrum_widget.plot(pen=pg.mkPen(color, width=2), name=name)
+            for color, name in zip(CURVE_COLORS, self.client.channel_names)
+        ]
+        self.peak_lines = []
+
         self.trigger_channel = QtWidgets.QComboBox()
         self.trigger_channel.addItems(self.client.channel_names)
 
@@ -166,14 +194,25 @@ class ScopeWindow(QtWidgets.QMainWindow):
         self.gain_spin = QtWidgets.QDoubleSpinBox(
             minimum=1.0, maximum=10.0, value=1.0, singleStep=0.5
         )
+        self.alpha_spin = QtWidgets.QDoubleSpinBox(
+            minimum=0.0, maximum=1.0, value=0.9, singleStep=0.05, decimals=2
+        )
+        self.peak_count_spin = QtWidgets.QSpinBox(minimum=0, maximum=50, value=8)
+        self._spectrum_average = None
 
         controls = QtWidgets.QWidget()
         form = QtWidgets.QFormLayout(controls)
 
         self.channel_checkboxes = [QtWidgets.QCheckBox(name) for name in self.client.channel_names]
-        for checkbox, curve in zip(self.channel_checkboxes, self.curves):
+        for index, (checkbox, curve, spectrum_curve) in enumerate(
+            zip(self.channel_checkboxes, self.curves, self.spectrum_curves)
+        ):
             checkbox.setChecked(True)
             checkbox.toggled.connect(curve.setVisible)
+            checkbox.toggled.connect(spectrum_curve.setVisible)
+            checkbox.toggled.connect(
+                lambda checked, channel=index: self._set_peak_lines_visible(channel, checked)
+            )
         self._rms_last_update = 0.0
 
         channels_group = QtWidgets.QGroupBox("Channels")
@@ -188,6 +227,8 @@ class ScopeWindow(QtWidgets.QMainWindow):
         scope_form.addRow("Trigger level", self.level_spin)
         scope_form.addRow("Time window", self.window_spin)
         scope_form.addRow("Gain", self.gain_spin)
+        scope_form.addRow("Spectrum averaging alpha", self.alpha_spin)
+        scope_form.addRow("Spectrum peaks", self.peak_count_spin)
         form.addRow(scope_group)
 
         self.tone_on = QtWidgets.QCheckBox("Tone on")
@@ -213,9 +254,14 @@ class ScopeWindow(QtWidgets.QMainWindow):
         self.tone_waveform.currentTextChanged.connect(self._apply_tone)
         self.tone_output.currentTextChanged.connect(self._reconnect_tone_output)
 
+        plots_splitter = QtWidgets.QSplitter(QtCore.Qt.Vertical)
+        plots_splitter.addWidget(self.plot_widget)
+        plots_splitter.addWidget(self.spectrum_widget)
+        plots_splitter.setSizes([440, 440])
+
         splitter = QtWidgets.QSplitter()
         splitter.addWidget(controls)
-        splitter.addWidget(self.plot_widget)
+        splitter.addWidget(plots_splitter)
         splitter.setSizes([220, 880])
         self.setCentralWidget(splitter)
 
@@ -232,6 +278,39 @@ class ScopeWindow(QtWidgets.QMainWindow):
         for connection in client.get_all_connections(self.client.out_port):
             client.disconnect(self.client.out_port, connection.name)
         client.connect(self.client.out_port, self.tone_output.currentText())
+
+    def _set_peak_lines_visible(self, channel, visible):
+        for line, line_channel in self.peak_lines:
+            if line_channel == channel:
+                line.setVisible(visible)
+
+    def _update_spectrum(self, fft_freqs):
+        freqs = fft_freqs[1:]  # skip DC
+        log_freqs = np.log10(freqs)  # ViewBox space under setLogMode(x=True)
+        peak_lines = []
+        for channel, (spectrum_curve, power, color) in enumerate(
+            zip(self.spectrum_curves, self._spectrum_average, CURVE_COLORS)
+        ):
+            power_db = 10 * np.log10(np.maximum(power[1:], 1e-20))
+            spectrum_curve.setData(freqs, power_db)
+            indices, properties = find_peaks(power_db, prominence=10)
+            peak_count = self.peak_count_spin.value()
+            strongest = np.argsort(properties["prominences"])[-peak_count:] if peak_count else []
+            for i in strongest:
+                line = pg.InfiniteLine(
+                    pos=log_freqs[indices[i]], angle=90,
+                    pen=pg.mkPen(color, style=QtCore.Qt.DotLine),
+                    label=f"{freqs[indices[i]]:.0f} Hz",
+                    labelOpts={"color": color, "position": 0.95, "rotateAxis": (1, 0)},
+                )
+                line.setVisible(self.channel_checkboxes[channel].isChecked())
+                peak_lines.append((line, channel))
+
+        for line, _ in self.peak_lines:
+            self.spectrum_widget.removeItem(line)
+        for line, _ in peak_lines:
+            self.spectrum_widget.addItem(line)
+        self.peak_lines = peak_lines
 
     def update_display(self):
         data = self.client.snapshot()
@@ -252,6 +331,20 @@ class ScopeWindow(QtWidgets.QMainWindow):
         for curve, channel_data in zip(self.curves, data):
             curve.setData(t, channel_data[trigger_index:stop])
         self.plot_widget.setYRange(-1 / self.gain_spin.value(), 1 / self.gain_spin.value())
+
+        # Hann window to reduce spectral leakage from the finite FFT window.
+        hann = np.hanning(window_samples)
+        fft_freqs = np.fft.rfftfreq(window_samples, d=1 / self.client.fs)
+        alpha = self.alpha_spin.value()
+        powers = np.stack([
+            np.abs(np.fft.rfft(channel_data[trigger_index:stop] * hann)) ** 2
+            for channel_data in data
+        ])
+        if self._spectrum_average is None or self._spectrum_average.shape != powers.shape:
+            self._spectrum_average = powers
+        else:
+            self._spectrum_average = alpha * self._spectrum_average + (1 - alpha) * powers
+        self._update_spectrum(fft_freqs)
 
         now = time.monotonic()
         if now - self._rms_last_update >= 0.5:

@@ -262,7 +262,7 @@ def plot_resonance_response(experiments, output_dir):
         source = relevant[0]["resonances"][label]["source"]
         sink = relevant[0]["resonances"][label]["sink"]
 
-        fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True)
+        fig, (ax1, ax2) = plt.subplots(2, 1, sharex=True, gridspec_kw={"height_ratios": [2, 1]})
         title = f"Resonance Response ({source} → {sink})"
         if len(relevant) == 1:
             title += f" — {relevant[0]['name']}"
